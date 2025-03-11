@@ -5,7 +5,9 @@ import pdfplumber
 import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from pathlib import Path
 from database import get_db, engine, Base
 from models import ResumeData
 
@@ -15,10 +17,15 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI()
 
+# Configure Gemini API
 genai.configure(api_key=os.getenv("YOUR_GEMINI_API_KEY"))
 
 # Initialize Database Tables
 Base.metadata.create_all(bind=engine)
+
+# Folder for uploaded resumes
+UPLOAD_FOLDER = "uploaded_resumes"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # Ensure the folder exists
 
 # Extract text from PDF file
 def extract_text_from_pdf(pdf_file) -> str:
@@ -78,7 +85,15 @@ async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     try:
-        text = extract_text_from_pdf(file.file)
+        # Save uploaded file to the server
+        file_path = Path(UPLOAD_FOLDER) / file.filename
+        with open(file_path, "wb") as f:
+            f.write(file.file.read())
+
+        # Generate resume URL dynamically
+        resume_url = f"http://localhost:8000/resumes/{file.filename}"
+
+        text = extract_text_from_pdf(file_path)
         analyzed_data = analyze_resume_with_gemini(text)
         parsed_data = parse_gemini_response(analyzed_data)
 
@@ -102,6 +117,9 @@ async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get
         db.commit()
         db.refresh(resume_entry)
 
+        # Include `resume_url` in response (not stored in DB)
+        parsed_data["resume_url"] = resume_url
+
         return {"message": "Resume analyzed successfully", "data": parsed_data}
 
     except HTTPException as e:
@@ -110,3 +128,11 @@ async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+# Serve uploaded resumes for access via URLs
+@app.get("/resumes/{filename}")
+async def get_resume_file(filename: str):
+    file_path = Path(UPLOAD_FOLDER) / filename
+    if file_path.exists():
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="File not found")
