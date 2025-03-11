@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+*.pyc
+__pycache__/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Python dependencies
+*.egg-info/
+*.log
+
+# SQLite database (if used)
+*.sqlite3
+
+# Pytest cache
+.pytest_cache/
