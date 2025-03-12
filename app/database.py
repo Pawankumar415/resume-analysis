@@ -9,9 +9,12 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DB_URL")
 
+
+Base = declarative_base()
+
+# Database engine and session
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
 # Dependency to get DB session
 def get_db():

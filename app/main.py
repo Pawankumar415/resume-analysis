@@ -1,4 +1,3 @@
-
 import json
 import os
 import pdfplumber
@@ -10,24 +9,23 @@ from sqlalchemy.orm import Session
 from pathlib import Path
 from database import get_db, engine, Base
 from models import ResumeData
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from routes import report_routes, subscription_routes, user_routes
+from fastapi.openapi.utils import get_openapi
 
-# Load environment variables
-load_dotenv()
-
-# Initialize FastAPI app
+# ==================== FASTAPI APP CONFIGURATION ====================
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/login")
 app = FastAPI()
 
-# Configure Gemini API
-genai.configure(api_key=os.getenv("YOUR_GEMINI_API_KEY"))
+# Include your routes
+app.include_router(report_routes.router, prefix="/reports", tags=["Reports"])
+app.include_router(subscription_routes.router, prefix="/subscriptions", tags=["Subscriptions"])
+app.include_router(user_routes.router, prefix="/users", tags=["Users"])
 
-# Initialize Database Tables
-Base.metadata.create_all(bind=engine)
-
-# Folder for uploaded resumes
+# ==================== ANALYZE RESUME ENDPOINT ====================
 UPLOAD_FOLDER = "uploaded_resumes"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # Ensure the folder exists
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # Ensure folder exists
 
-# Extract text from PDF file
 def extract_text_from_pdf(pdf_file) -> str:
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -38,25 +36,20 @@ def extract_text_from_pdf(pdf_file) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to extract text: {str(e)}")
 
-# Analyze resume with Gemini API
 def analyze_resume_with_gemini(text: str) -> str:
     prompt = (
-        "Analyze this resume and provide the following details in JSON format:\n"
+        "Analyze this resume and provide details in JSON format:\n"
         "{"
-        '"overall_score": <numeric value between 0 and 100>,\n'
-        '"relevance": <numeric score between 0 and 10>,\n'
-        '"skills_fit": <numeric score between 0 and 10>,\n'
-        '"experience_match": <numeric score between 0 and 10>,\n'
-        '"cultural_fit": <numeric score between 0 and 10>,\n'
+        '"overall_score": <numeric value>,\n'
+        '"relevance": <numeric value>,\n'
+        '"skills_fit": <numeric value>,\n'
+        '"experience_match": <numeric value>,\n'
+        '"cultural_fit": <numeric value>,\n'
         '"strengths": <list of key strengths>,\n'
-        '"weaknesses": <list of key weaknesses or gaps>,\n'
-        '"missing_elements": <list of key missing qualifications or experiences>,\n'
-        '"recommendations": <list of suggestions for improvement>,\n'
-        '"candidate_info": {'
-        '    "name": "<candidate name>",\n'
-        '    "gmail": "<candidate email>",\n'
-        '    "phone": "<candidate phone number>"\n'
-        '  }'
+        '"weaknesses": <list of key weaknesses>,\n'
+        '"missing_elements": <list of missing qualifications>,\n'
+        '"recommendations": <list of suggestions>,\n'
+        '"candidate_info": { "name": "<candidate name>", "gmail": "<email>", "phone": "<phone>" }\n'
         "}"
         f"\nResume text:\n{text}"
     )
@@ -64,33 +57,27 @@ def analyze_resume_with_gemini(text: str) -> str:
     model = genai.GenerativeModel("gemini-1.5-pro")
     try:
         response = model.generate_content(prompt)
-        print("🔍 Gemini API Response:", response.text)  # Debugging output
         return response.text.strip()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
 
-# Parse Gemini response into JSON
 def parse_gemini_response(response_text: str) -> dict:
     cleaned_response = response_text.strip().strip("```").replace("json", "").strip()
-
     try:
-        parsed_data = json.loads(cleaned_response)
-        return parsed_data
+        return json.loads(cleaned_response)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Parsing error: {str(e)}")
 
-@app.post("/analyze_resume/")
+@app.post("/analyze_resume/", tags=["Resume Analysis"])
 async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     try:
-        # Save uploaded file to the server
         file_path = Path(UPLOAD_FOLDER) / file.filename
         with open(file_path, "wb") as f:
             f.write(file.file.read())
 
-        # Generate resume URL dynamically
         resume_url = f"http://localhost:8000/resumes/{file.filename}"
 
         text = extract_text_from_pdf(file_path)
@@ -117,9 +104,7 @@ async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get
         db.commit()
         db.refresh(resume_entry)
 
-        # Include `resume_url` in response (not stored in DB)
         parsed_data["resume_url"] = resume_url
-
         return {"message": "Resume analyzed successfully", "data": parsed_data}
 
     except HTTPException as e:
@@ -127,12 +112,43 @@ async def analyze_resume(file: UploadFile = File(...), db: Session = Depends(get
         raise e
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-# Serve uploaded resumes for access via URLs
 @app.get("/resumes/{filename}")
 async def get_resume_file(filename: str):
     file_path = Path(UPLOAD_FOLDER) / filename
     if file_path.exists():
         return FileResponse(file_path)
     raise HTTPException(status_code=404, detail="File not found")
+
+# ================== SWAGGER UI SECURITY CONFIGURATION ==================
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Resume Analysis API",
+        version="1.0.0",
+        description="API for analyzing resumes and generating reports",
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
+    }
+    openapi_schema["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+@app.get("/secure-data", dependencies=[Depends(oauth2_scheme)])
+async def secure_data():
+    return {"message": "You have access to secure data."}
+
+# ================= DATABASE INITIALIZATION ==================
+load_dotenv()
+genai.configure(api_key=os.getenv("YOUR_GEMINI_API_KEY"))
+Base.metadata.create_all(bind=engine)
